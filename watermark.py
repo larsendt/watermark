@@ -1,27 +1,64 @@
 #!/usr/bin/env python3
 
 import functools
-from PIL import Image
 import os
 
+from PIL import Image
+
+
 class WmCfg(object):
-    def __init__(watermark_path, input_dir, output_dir, quality=97, alpha=150, landscape_fraction=0.1, portrait_fraction=0.025):
+    def __init__(
+        self,
+        watermark_path,
+        input_image_path,
+        output_image_path,
+        quality=97,
+        alpha=150,
+        landscape_fraction=0.1,
+        portrait_fraction=0.025,
+        border=0.005,
+    ):
         self.watermark_path = watermark_path
-        self.input_dir = input_dir
-        self.output_dir = output_dir
+        self.input_image_path = input_image_path
+        self.output_image_path = output_image_path
         self.quality = quality
         self.alpha = alpha
         self.landscape_fraction = landscape_fraction
         self.portrait_fraction = portrait_fraction
+        self.border = border
+
 
 class ThumbCfg(object):
-    def __init__(watermark_path, input_dir, output_dir, quality=97, clamp_width=250, clamp_height=None):
-        self.watermark_path = watermark_path
-        self.input_dir = input_dir
-        self.output_dir = output_dir
+    def __init__(
+        self,
+        input_image_path,
+        output_image_path,
+        quality=97,
+        clamp_width=250,
+        clamp_height=None,
+    ):
+        self.input_image_path = input_image_path
+        self.output_image_path = output_image_path
         self.quality = quality
         self.clamp_width = clamp_width
         self.clamp_height = clamp_height
+
+    def width_height(self, im):
+        if self.clamp_width == None and self.clamp_height == None:
+            raise ValueError(
+                "Must have either clamp width or clamp height to thumbnail."
+            )
+        elif self.clamp_width == None:
+            self.clamp_width = int((self.clamp_height / im.height) * im.width)
+        elif self.clamp_height == None:
+            self.clamp_height = int((self.clamp_width / im.width) * im.height)
+        else:
+            raise ValueError(
+                "Setting both clamp_width and clamp_height would change the aspect ratio of the thumbnail."
+            )
+
+        return (self.clamp_width, self.clamp_height)
+
 
 def image_transpose_exif(im):
     """
@@ -39,16 +76,16 @@ def image_transpose_exif(im):
     """
 
     exif_orientation_tag = 0x0112
-    exif_transpose_sequences = [                   # Val  0th row  0th col
-        [],                                        #  0    (reserved)
-        [],                                        #  1   top      left
-        [Image.FLIP_LEFT_RIGHT],                   #  2   top      right
-        [Image.ROTATE_180],                        #  3   bottom   right
-        [Image.FLIP_TOP_BOTTOM],                   #  4   bottom   left
+    exif_transpose_sequences = [  # Val  0th row  0th col
+        [],  #  0    (reserved)
+        [],  #  1   top      left
+        [Image.FLIP_LEFT_RIGHT],  #  2   top      right
+        [Image.ROTATE_180],  #  3   bottom   right
+        [Image.FLIP_TOP_BOTTOM],  #  4   bottom   left
         [Image.FLIP_LEFT_RIGHT, Image.ROTATE_90],  #  5   left     top
-        [Image.ROTATE_270],                        #  6   right    top
+        [Image.ROTATE_270],  #  6   right    top
         [Image.FLIP_TOP_BOTTOM, Image.ROTATE_90],  #  7   right    bottom
-        [Image.ROTATE_90],                         #  8   left     bottom
+        [Image.ROTATE_90],  #  8   left     bottom
     ]
 
     try:
@@ -59,65 +96,72 @@ def image_transpose_exif(im):
         return functools.reduce(type(im).transpose, seq, im)
 
 
-def watermark_and_thumbnail(watermark_path, input_image_path, watermarked_output_path, thumbnail_output_path, alpha=150, width_fraction=0.2, clamp_width=250, clamp_height=None, quality=97):
-    im = Image.open(input_image_path)
+def thumbnail(thumb_cfg: ThumbCfg):
+    im = Image.open(thumb_cfg.input_image_path)
     im = image_transpose_exif(im)
-    wm = Image.open(watermark_path)
-
-    
-    print("wm/th args: alpha:{}, width_frac: {}, clamp_width:{}, clamp_height:{} quality:{}".format(alpha, width_fraction, clamp_width, clamp_height, quality))
-    if clamp_width == None and clamp_height == None:
-        raise ValueError("Must have either clamp width or clamp height to thumbnail.")
-    elif clamp_width == None:
-        clamp_width = int((clamp_height / im.height) * im.width)
-    elif clamp_height == None:
-        clamp_height = int((clamp_width / im.width) * im.height)
-    print("Thumb: resizing {} to {},{}".format(thumbnail_output_path, clamp_width, clamp_height))
-    thumb = im.resize((clamp_width, clamp_height))
-    thumb.save(thumbnail_output_path, quality=quality)
-
-    for x in range(wm.width):
-        for y in range(wm.height):
-            (r, g, b, a) = wm.getpixel((x, y))
-            if a > 0:
-                a = alpha
-                wm.putpixel((x, y), (r, g, b, a))
+    thumb = im.resize(thumb_cfg.width_height(im))
+    thumb.save(
+        thumb_cfg.output_image_path, quality=thumb_cfg.quality, exif=im.info["exif"]
+    )
 
 
-    desired_width = int(im.width * width_fraction)
-    desired_height = int((float(desired_width) / wm.width) * wm.height)
+def watermark(wm_cfg: WmCfg):
+    im = Image.open(wm_cfg.input_image_path)
+    im = image_transpose_exif(im)
+    wm = Image.open(wm_cfg.watermark_path)
+
+    if im.width > im.height:
+        desired_width = int(im.width * wm_cfg.landscape_fraction)
+        desired_height = int((float(wm.width) / im.width) * wm.height)
+        border = int(im.width * wm_cfg.border)
+    else:
+        desired_width = int(im.height * wm_cfg.portrait_fraction)
+        desired_height = int((float(wm.height) / im.height) * wm.width)
+        border = int(im.height * wm_cfg.border)
     wm = wm.resize((desired_width, desired_height))
 
-    border = 20
     x_pos = im.width - desired_width - border
     y_pos = im.height - desired_height - border
 
     im.paste(wm, (x_pos, y_pos), wm)
-    im.save(watermarked_output_path, quality=quality)
+    im.save(wm_cfg.output_image_path, quality=wm_cfg.quality, exif=im.info["exif"])
+
 
 def main():
-    alpha = 180
-    width_frac = 0.4
-    thumb_width = 300
-    quality = 97
-
-    input_dir = os.path.expanduser("~/portfolio_website/raw_images")
-    watermarked_output_dir = os.path.expanduser("~/portfolio_website/images")
-    thumbnail_output_dir = os.path.expanduser("~/portfolio_website/thumbs")
-    watermark_path = os.path.expanduser("~/watermark/emmaduffy_watermark.png")
+    input_dir = os.path.expanduser("~/dev/misc/watermark/input_images")
+    watermarked_output_dir = os.path.expanduser("~/dev/misc/watermark/output_images")
+    thumbnail_output_dir = os.path.expanduser("~/dev/misc/watermark/thumbs")
+    watermark_path = os.path.expanduser("~/dev/misc/watermark/emmaduffy_watermark.png")
 
     for f in os.listdir(input_dir):
         input_path = os.path.join(input_dir, f)
         watermarked_output_path = os.path.join(watermarked_output_dir, f)
         thumbnail_output_path = os.path.join(thumbnail_output_dir, f)
 
-        if not f.lower().endswith(".jpg"):
+        if not f.lower().endswith(".jpg") and not f.lower().endswith(".jpeg"):
             print("{} doesn't seem to be a JPEG, not watermarking".format(f))
             continue
 
+        wm_cfg = WmCfg(
+            watermark_path,
+            input_path,
+            watermarked_output_path,
+            alpha=120,
+            landscape_fraction=0.1,
+            portrait_fraction=0.025,
+        )
         print("Watermarking {}, will be put in {}".format(f, watermarked_output_dir))
+        watermark(wm_cfg)
+
+        thumb_cfg = ThumbCfg(
+            input_image_path=input_path,
+            output_image_path=thumbnail_output_path,
+            clamp_width=300,
+            clamp_height=None,
+        )
         print("Thumbnailing {}, will be put in {}".format(f, thumbnail_output_dir))
-        watermark_and_thumbnail(watermark_path, input_path, watermarked_output_path, thumbnail_output_path, alpha=alpha, width_fraction=width_frac, quality=quality, clamp_width=thumb_width)
+        thumbnail(thumb_cfg)
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
